@@ -190,7 +190,7 @@ class SGLangModel(Model):
 
         return result
 
-    def _format_tools(self, tool_specs: list[ToolSpec]) -> list[dict]:
+    def format_tool_specs(self, tool_specs: list[ToolSpec]) -> list[dict]:
         """Format strands ToolSpecs to OpenAI format for chat templates."""
         return [
             {
@@ -337,7 +337,7 @@ class SGLangModel(Model):
         """
         # Format tools (only on first call)
         if tool_specs and not self._current_tools:
-            self._current_tools = self._format_tools(tool_specs)
+            self._current_tools = self.format_tool_specs(tool_specs)
             logger.debug(f"tools formatted: {len(self._current_tools)} tools")
 
         # Prepare request
