@@ -52,7 +52,7 @@ class TestFormatTools:
                 "inputSchema": {"json": {"type": "object", "properties": {"expr": {"type": "string"}}}},
             }
         ]
-        result = model._format_tools(tool_specs)
+        result = model.format_tool_specs(tool_specs)
 
         assert len(result) == 1
         assert result[0]["type"] == "function"
@@ -67,7 +67,7 @@ class TestFormatTools:
             {"name": "tool2", "description": "Second tool", "inputSchema": {"json": {}}},
             {"name": "tool3", "description": "Third tool", "inputSchema": {"json": {}}},
         ]
-        result = model._format_tools(tool_specs)
+        result = model.format_tool_specs(tool_specs)
 
         assert len(result) == 3
         assert [t["function"]["name"] for t in result] == ["tool1", "tool2", "tool3"]
@@ -76,11 +76,11 @@ class TestFormatTools:
         """Format tool spec with missing required fields raises KeyError."""
         tool_specs = [{"name": "minimal"}]
         with pytest.raises(KeyError):
-            model._format_tools(tool_specs)
+            model.format_tool_specs(tool_specs)
 
     def test_format_empty_tools(self, model):
         """Format empty tool specs list."""
-        result = model._format_tools([])
+        result = model.format_tool_specs([])
         assert result == []
 
 
