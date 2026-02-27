@@ -191,7 +191,7 @@ class TestToolLimiterTrajectory:
             pass  # Expected if limit reached
 
         # Get trajectory from model
-        trajectory = fresh_model.format_request_messages(agent.messages, None)
+        trajectory = fresh_model.format_messages(agent.messages, None)
 
         # Count tool messages in trajectory
         tool_message_count = sum(1 for msg in trajectory if msg["role"] == "tool")
@@ -217,7 +217,7 @@ class TestToolLimiterTrajectory:
         # Should complete without hitting limit
         await agent.invoke_async(SIMPLE_PROBLEM)
 
-        trajectory = fresh_model.format_request_messages(agent.messages, None)
+        trajectory = fresh_model.format_messages(agent.messages, None)
         tool_message_count = sum(1 for msg in trajectory if msg["role"] == "tool")
 
         assert limiter.tool_iter_count == tool_message_count, (

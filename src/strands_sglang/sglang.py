@@ -27,6 +27,7 @@ throughout the rollout instead of converting text back to tokens.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import (
@@ -43,14 +44,13 @@ from typing import (
 
 from pydantic import BaseModel
 from strands.models import Model
-from strands.models.openai import OpenAIModel
-from strands.types.content import Messages, SystemContentBlock
+from strands.types.content import ContentBlock, Messages, SystemContentBlock
 from strands.types.exceptions import (
     ContextWindowOverflowException,
     ModelThrottledException,
 )
 from strands.types.streaming import StreamEvent
-from strands.types.tools import ToolChoice, ToolSpec
+from strands.types.tools import ToolChoice, ToolResultContent, ToolSpec
 from typing_extensions import Unpack, override
 
 from .client import SGLangClient
@@ -155,38 +155,69 @@ class SGLangModel(Model):
     # -------------------------------------------------------------------------
 
     @classmethod
-    def format_request_message_content(cls, message: dict[str, Any]) -> None:
-        """Format a single message's content for chat templates.
-
-        Flattens content arrays and preserves raw content including tool call
-        markup to maintain exact generation order for token-in/token-out reconstruction.
-        Modifies the message in-place.
-        """
-        # Flatten content from [{"text": "..."}, ...] to "..."
-        # Find first text block (content array may have other block types)
-        if "content" in message and isinstance(message["content"], list):
-            text_content = ""
-            for block in message["content"]:
-                if "text" in block:
-                    text_content = block["text"]
-                    break
-            message["content"] = text_content
-
-        # Remove strands-processed tool_calls field and let the chat template handle it.
-        if "tool_calls" in message:
-            del message["tool_calls"]
+    def format_content_block(
+        cls, content: ContentBlock | ToolResultContent, is_multimodal: bool = False
+    ) -> dict[str, Any] | str:
+        """Convert a single Strands `ContentBlock` or `ToolResultContent` to HF chat template format."""
+        # keep dict structure for multimodal content
+        hf_content = {}
+        match content:
+            case {"text": text}:
+                hf_content = {"type": "text", "text": text}
+            case {"image": image}:
+                mime = f"image/{image['format']}"
+                encoded = base64.b64encode(image["source"]["bytes"]).decode()
+                hf_content = {"type": "image", "image": f"data:{mime};base64,{encoded}"}
+            case {"json": data}:
+                # json only for tool results
+                hf_content = {"type": "text", "text": json.dumps(data)}
+            # TODO: add support for other content types
+            case _:
+                raise TypeError(f"content_type=<{next(iter(content))}> | unsupported type")
+        # flatten to text if not multimodal
+        if not is_multimodal:
+            hf_content = hf_content["text"]
+        return hf_content
 
     @classmethod
-    def format_request_messages(cls, messages: Messages, system_prompt: str | None = None) -> list[dict[str, Any]]:
-        """Convert strands Messages to OpenAI format for chat templates.
+    def format_messages(
+        cls, messages: Messages, system_prompt: str | None = None, is_multimodal: bool = False
+    ) -> list[dict[str, Any]]:
+        """Convert Strands Messages to HF chat template format.
 
-        Uses strands' OpenAIModel formatter and flattens content
-        for compatibility with HuggingFace apply_chat_template.
+        ``toolResult`` messages become ``role: "tool"`` messages.
+        Text-only content is flattened to a plain string.
+        ``toolUse`` blocks are skipped — tool calls live in the raw text
+        and are handled by :class:`ToolParser`.
         """
-        result = OpenAIModel.format_request_messages(messages=messages, system_prompt=system_prompt)
+        result: list[dict[str, Any]] = []
 
-        for message in result:
-            cls.format_request_message_content(message)
+        if system_prompt:
+            result.append({"role": "system", "content": system_prompt})
+
+        for msg in messages:
+            first_block = msg["content"][0]
+            tool_result = first_block.get("toolResult")
+            if tool_result:
+                for content_block in tool_result["content"]:
+                    result.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_result["toolUseId"],
+                            "content": cls.format_content_block(content_block, is_multimodal),
+                        }
+                    )
+            else:
+                for content_block in msg["content"]:
+                    # toolUse blocks are skipped — tool calls live in the raw text
+                    if "toolUse" in content_block:
+                        continue
+                    result.append(
+                        {
+                            "role": msg["role"],
+                            "content": cls.format_content_block(content_block, is_multimodal),
+                        }
+                    )
 
         return result
 
@@ -218,7 +249,7 @@ class SGLangModel(Model):
         The result is manually tokenized (not model-generated) and added to
         the token trajectory with `loss_mask=False`.
         """
-        chat_messages = self.format_request_messages(messages, system_prompt)
+        chat_messages = self.format_messages(messages, system_prompt)
         return self.tokenizer.apply_chat_template(
             conversation=chat_messages,
             tools=tools,
