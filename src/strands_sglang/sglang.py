@@ -167,28 +167,28 @@ class SGLangModel(Model):
 
     @classmethod
     def format_content_block(
-        cls, content: ContentBlock | ToolResultContent, is_multimodal: bool = False
+        cls, content_block: ContentBlock | ToolResultContent, is_multimodal: bool = False
     ) -> dict[str, Any] | str:
         """Convert a single Strands `ContentBlock` or `ToolResultContent` to HF chat template format."""
         # keep dict structure for multimodal content
-        hf_content = {}
-        match content:
+        result = {}
+        match content_block:
             case {"text": text}:
-                hf_content = {"type": "text", "text": text}
+                result = {"type": "text", "text": text}
             case {"image": image}:
                 mime = f"image/{image['format']}"
                 encoded = base64.b64encode(image["source"]["bytes"]).decode()
-                hf_content = {"type": "image", "image": f"data:{mime};base64,{encoded}"}
+                result = {"type": "image", "image": f"data:{mime};base64,{encoded}"}
             case {"json": data}:
                 # json only for tool results
-                hf_content = {"type": "text", "text": json.dumps(data)}
+                result = {"type": "text", "text": json.dumps(data)}
             # TODO: add support for other content types
             case _:
-                raise TypeError(f"content_type=<{next(iter(content))}> | unsupported type")
+                raise TypeError(f"content_type=<{next(iter(content_block))}> | unsupported type")
         # flatten to text if not multimodal
         if not is_multimodal:
-            hf_content = hf_content["text"]
-        return hf_content
+            result = result["text"]
+        return result
 
     @classmethod
     def format_messages(
@@ -213,12 +213,12 @@ class SGLangModel(Model):
                 for cb in msg["content"]:
                     assert "toolResult" in cb
                     tr = cb["toolResult"]
-                    parts = [cls.format_content_block(c, is_multimodal) for c in tr["content"]]
-                    content = parts if is_multimodal else parts[0]
+                    content = [cls.format_content_block(c, is_multimodal) for c in tr["content"]]
+                    content = content if is_multimodal else content[0]
                     result.append({"role": "tool", "tool_call_id": tr["toolUseId"], "content": content})
             else:
                 # Non-tool content → one HF message (text, image, etc.; toolUse skipped)
-                content = [cls.format_content_block(cb, is_multimodal) for cb in msg["content"] if "toolUse" not in cb]
+                content = [cls.format_content_block(c, is_multimodal) for c in msg["content"] if "toolUse" not in c]
                 content = content if is_multimodal else content[0]
                 result.append({"role": msg["role"], "content": content})
 
