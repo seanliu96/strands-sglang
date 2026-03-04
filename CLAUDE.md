@@ -18,6 +18,7 @@ pre-commit install -t pre-commit -t commit-msg
 ```bash
 ruff check src/
 ruff format --check src/
+mypy src/strands_sglang/
 ```
 
 ### Testing
@@ -67,10 +68,13 @@ The package lives in `src/strands_sglang/` with 7 core modules:
 
 ## Code Style
 
-- Ruff for linting and formatting (line-length 120, rules: E, F, I, N, W)
+- Ruff for linting and formatting (line-length 120, rules: B, D, E, F, G, I, LOG, N, UP, W)
+- Google-style docstrings enforced by ruff D rules (required for `src/`, not tests)
+- mypy for type checking (strict: `disallow_untyped_defs`, `disallow_incomplete_defs`)
 - Conventional commits enforced by pre-commit hook (feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert)
+- Pre-commit also runs codespell, license header check, mypy, and unit tests
 - Python 3.10+ required
-- asyncio_mode = "auto" for pytest-asyncio
+- asyncio_mode = "auto" for pytest-asyncio, default timeout = 90s
 
 ## Integration Tests with Remote GPU Server
 
