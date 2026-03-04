@@ -66,6 +66,10 @@ The package lives in `src/strands_sglang/` with 7 core modules:
 - **Segment-based TITO**: Token tracking mirrors multi-turn structure (prompt=no loss, response=loss)
 - **VLM via processor**: When `processor` is provided, tokenization switches from `tokenizer.encode(text)` to `processor(text, images)["input_ids"][0]` (unwrapping batch dimension). Images are accumulated as base64 data URLs and forwarded to SGLang's `image_data` parameter. `torch` and `torchvision` are not pinned as dependencies — users install them separately to match their CUDA version
 
+## Maintenance
+
+When adding new modules, changing commands, or altering key design patterns, update this file to reflect those changes.
+
 ## Code Style
 
 - Ruff for linting and formatting (line-length 120, rules: B, D, E, F, G, I, LOG, N, UP, W)
