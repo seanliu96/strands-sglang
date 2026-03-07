@@ -80,6 +80,9 @@ async def main():
     print(f"\n[Input Problem]: {math_500_problem}")
     await agent.invoke_async(math_500_problem)
     print(f"\n[Output Trajectory]: {json.dumps(agent.messages, indent=2)}")
+    if model.token_manager:
+        # Token trajectory
+        print(f"[Output Tokens - Decoded]: {tokenizer.decode(model.token_manager.token_ids)}")
 
     # -------------------------------------------------------------------------
     # 3. Access TITO Data
