@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 @register_tool_parser("qwen_xml")
 class QwenXMLToolParser(ToolParser):
-    r"""Parser for Qwen3-Coder XML tool call format.
+    r"""Parser for Qwen3.5 and Qwen3-Coder XML tool call format.
 
     Format:
         <tool_call>
@@ -43,7 +43,7 @@ class QwenXMLToolParser(ToolParser):
         </tool_call>
 
     Used by:
-    - Qwen/Qwen3-Coder models
+    - Qwen3.5/Qwen3-Coder models
 
     This format uses attribute-style XML tags where the function name and
     parameter names are embedded in the tag itself (e.g., `<function=name>`
