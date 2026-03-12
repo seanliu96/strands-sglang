@@ -39,7 +39,6 @@ Repository = "https://github.com/horizon-rl/strands-sglang/"
 Issues = "https://github.com/horizon-rl/strands-sglang/issues"
 
 [project.optional-dependencies]
-vision = ["transformers[vision]"]  # also requires torch + torchvision, installed separately
 dev = [
     # Testing
     "pytest>=7.0.0",
@@ -47,6 +46,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.0.0",
     "pytest-timeout>=2.0.0",
+    "tiktoken>=0.5.0",
     # Linting & Build
     "pre-commit",
     "ruff>=0.6.0",
@@ -68,7 +68,10 @@ python_files = ["test_*.py"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 timeout = 90
-markers = ["integration: tests that require a running SGLang server"]
+markers = [
+    "integration: tests that require a running SGLang server",
+    "chat_template: tests against real HuggingFace tokenizers (requires network on first run)",
+]
 
 [tool.ruff]
 line-length = 120

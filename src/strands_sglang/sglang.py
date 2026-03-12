@@ -19,9 +19,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterable, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterable
+from functools import cached_property
 from typing import (
-    TYPE_CHECKING,
     Any,
     TypedDict,
     TypeVar,
@@ -37,15 +37,13 @@ from strands.types.exceptions import (
 )
 from strands.types.streaming import StopReason, StreamEvent
 from strands.types.tools import ToolChoice, ToolResultContent, ToolSpec
+from transformers import PretrainedConfig, PreTrainedTokenizerBase
 from typing_extensions import Unpack, override
 
 from .client import SGLangClient
 from .exceptions import SGLangContextLengthError, SGLangThrottledError
 from .token import TokenManager
-from .tool_parsers import HermesToolParser, ToolParser, ToolParseResult
-
-if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizerBase, ProcessorMixin
+from .tool_parsers import HermesToolParser, ToolParser
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +76,7 @@ class SGLangModel(Model):
         self,
         *,
         client: SGLangClient,
-        tokenizer: PreTrainedTokenizerBase | None = None,
-        processor: ProcessorMixin | None = None,
+        tokenizer: PreTrainedTokenizerBase,
         tool_parser: ToolParser | None = None,
         **config: Unpack[SGLangConfig],
     ) -> None:
@@ -87,45 +84,42 @@ class SGLangModel(Model):
 
         Args:
             client: `SGLangClient` for HTTP communication with the SGLang server.
-            tokenizer: HuggingFace tokenizer for chat template and tokenization (optional if processor is provided).
-            processor: HuggingFace processor for multimodal processing.
+            tokenizer: HuggingFace tokenizer for chat template and tokenization.
             tool_parser: `ToolParser` for tool calls (default: `HermesToolParser`).
-            **config: Additional SGLang generation configuration.
+            **config: Additional SGLang generation configuration (see `SGLangConfig`).
         """
         self.client = client
-        self.processor = processor
-        self.tokenizer = cast(
-            "PreTrainedTokenizerBase", (processor and getattr(processor, "tokenizer", None)) or tokenizer
-        )
-        if not self.tokenizer:
-            raise ValueError("Either tokenizer (text-only) or processor (multimodal) must be provided")
+        self.tokenizer = tokenizer
         self.tool_parser = tool_parser or HermesToolParser()
         self.config = dict(config)
-        self.tool_parser.validate_tokenizer(self.tokenizer)
+        self._chat_template_kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "enable_thinking": self.config.get("enable_thinking", True),
+        }
 
         # State tracking (this makes SGLangModel stateful)
         self.token_manager = TokenManager()
-        self._processed_message_count: int = 0
+        self.message_count: int = 0
         self.tool_parse_errors: dict[str, int] = {}  # per-tool parse error count
         self.image_data: list[str] = []  # accumulated image data URLs (VLM only)
 
         logger.debug("initialized with config: %s", self.config)
 
     def reset(self) -> None:
-        """Reset token accumulation for a new episode.
-
-        Call this at episode start. Clears all accumulated tokens and resets
-        internal state for tool tracking.
-        """
+        """Reset all state for a new episode."""
         self.token_manager.reset()
-        self._processed_message_count = 0
+        self.message_count = 0
         self.tool_parse_errors = {}
         self.image_data = []
 
-    @property
+    @cached_property
     def is_multimodal(self) -> bool:
-        """Whether the model is multimodal."""
-        return self.processor is not None
+        """Auto-detect multimodal support from the model's HuggingFace config.
+
+        Mirrors SGLang's logic: `hasattr(hf_config, "vision_config")`.
+        """
+        hf_config = PretrainedConfig.from_pretrained(self.tokenizer.name_or_path)
+        return hasattr(hf_config, "vision_config")
 
     # -------------------------------------------------------------------------
     # Model interface implementation
@@ -133,25 +127,34 @@ class SGLangModel(Model):
 
     @override
     def update_config(self, **model_config: Unpack[SGLangConfig]) -> None:  # type: ignore[override]
-        """Update the model configuration.
-
-        Args:
-            **model_config: Configuration overrides.
-        """
+        """Update the model configuration."""
         self.config.update(model_config)
 
     @override
     def get_config(self) -> SGLangConfig:
-        """Get the model configuration.
-
-        Returns:
-            The model configuration dict.
-        """
+        """Get the model configuration."""
         return cast(SGLangModel.SGLangConfig, self.config)
 
     # -------------------------------------------------------------------------
     # Chat template and message formatting
     # -------------------------------------------------------------------------
+
+    @cached_property
+    def message_separator(self) -> str:
+        """Auto-detect text bridging the previous response's stop token and the next message.
+
+        Probes the chat template with a terminal assistant message. The text after the
+        marker is `stop_token + separator`. Strip `stop_token` to get the separator if it exists.
+        """
+        probe = str(
+            self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": "U"}, {"role": "assistant", "content": "__M__"}],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        )
+        sep = self.tokenizer.encode(probe.split("__M__", 1)[1], add_special_tokens=False)[1:]
+        return self.tokenizer.decode(sep) if sep else ""
 
     @classmethod
     def format_content_block(
@@ -190,7 +193,8 @@ class SGLangModel(Model):
         result: list[dict[str, Any]] = []
 
         if system_prompt:
-            result.append({"role": "system", "content": system_prompt})
+            content: Any = [{"type": "text", "text": system_prompt}] if is_multimodal else system_prompt
+            result.append({"role": "system", "content": content})
 
         # Each Strands message is {"role": str, "content": [ContentBlock, ...]}
         # One Strands message maps to one HF message, except toolResult blocks
@@ -217,7 +221,7 @@ class SGLangModel(Model):
         return result
 
     def format_tool_specs(self, tool_specs: list[ToolSpec]) -> list[dict]:
-        """Format strands ToolSpecs to OpenAI format for chat templates."""
+        """Format strands ToolSpecs to HF chat template format."""
         return [
             {
                 "type": "function",
@@ -230,119 +234,159 @@ class SGLangModel(Model):
             for spec in tool_specs
         ]
 
-    def format_prompt(
-        self,
-        messages: Messages,
-        system_prompt: str | None = None,
-        tools: list[dict] | None = None,
-        add_generation_prompt: bool = True,
-    ) -> str:
-        """Format messages into a prompt string using the HuggingFace chat template.
-
-        The result is manually tokenized (not model-generated) and added to
-        the token trajectory with `loss_mask=False`.
-        """
-        chat_messages = self.format_messages(messages, system_prompt, is_multimodal=self.is_multimodal)
-        self.image_data.extend(self.extract_image_urls(chat_messages))
-        # TODO: add support for other modalities later
-        return str(
-            self.tokenizer.apply_chat_template(
-                conversation=chat_messages,
-                tools=cast(list[dict | Callable], tools),
-                add_generation_prompt=add_generation_prompt,
-                tokenize=False,
-                enable_thinking=self.config.get("enable_thinking"),
-            )
-        )
-
     @staticmethod
-    def extract_image_urls(messages: list[dict[str, Any]]) -> list[str]:
-        """Extract image data URLs from HF-formatted multimodal messages."""
-        urls: list[str] = []
-        for msg in messages:
-            content = msg.get("content")
-            if isinstance(content, dict) and content.get("type") == "image":
-                urls.append(content["image"])
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "image":
-                        urls.append(part["image"])
-        return urls
+    def sort_tool_results(messages: Messages) -> Messages:
+        """Sort tool results by ID to match original call order.
 
-    # -------------------------------------------------------------------------
-    # Generation
-    # -------------------------------------------------------------------------
+        Notes:
+            In strands' format, parallel tool results are batched into a single message.
+        """
+        return [
+            {**msg, "content": sorted(msg["content"], key=lambda c: c["toolResult"]["toolUseId"])}
+            if "toolResult" in msg["content"][0]
+            else msg
+            for msg in messages
+        ]
 
     def tokenize_prompt_messages(
         self,
         messages: Messages,
         system_prompt: str | None,
-        tools: list[dict] | None = None,
-    ) -> list[int] | None:
+        tool_specs: list[ToolSpec] | None = None,
+    ) -> list[int]:
         """Tokenize prompt messages for the next generation call.
 
-        First call: tokenizes full prompt with system prompt and tools.
-        Subsequent calls: tokenizes only new messages (tool results, user messages),
-        prepending the message separator to align with chat template formatting.
-
-        For VLM (when `self.processor` is set), uses the processor to insert
-        image placeholder tokens based on `self.image_data`.
+        Notes:
+            - First call: tokenizes full prompt with system prompt and tools.
+            - Subsequent calls: uses a fake prefix (system + user) for boundary formatting,
+            then subtracts it to extract only incremental tokens.
         """
 
-        def _tokenize(text: str) -> list[int]:
-            if self.processor:
-                return list(self.processor(text=text, images=self.image_data or None)["input_ids"][0])  # type: ignore[arg-type]
-            return list(self.tokenizer.encode(text, add_special_tokens=False))
+        # TODO: add support for other modalities (e.g. audio, video, etc.)
+        def update_multimodal_data(hf_messages: list[dict[str, Any]]) -> None:
+            if not self.is_multimodal:
+                return
+            for msg in hf_messages:
+                for part in msg["content"]:
+                    match part.get("type"):
+                        case "image":
+                            self.image_data.append(part["image"])
 
         # First call: full prompt with tools
-        if len(self.token_manager) == 0:
-            formatted = self.format_prompt(messages, system_prompt, tools=tools)
-            return _tokenize(formatted)
+        if self.message_count == 0:
+            hf_messages = self.format_messages(messages, system_prompt, is_multimodal=self.is_multimodal)
+            update_multimodal_data(hf_messages)
+            tools = self.format_tool_specs(tool_specs) if tool_specs else None
+            prompt = cast(
+                str,
+                self.tokenizer.apply_chat_template(
+                    hf_messages, tools=cast(list, tools), add_generation_prompt=True, **self._chat_template_kwargs
+                ),
+            )
+            return list(self.tokenizer.encode(prompt, add_special_tokens=False))
 
-        # Subsequent calls: only new messages (prepend fake user to satisfy chat template assumptions).
-        # See: https://github.com/horizon-rl/strands-sglang/issues/29
-        if len(messages) > self._processed_message_count:
-            new_messages = self._sort_tool_results(messages[self._processed_message_count :])
-            fake: Messages = [{"role": "user", "content": [{"text": "ONLY FOR INCREMENTAL TOKENIZATION"}]}]
-            full = self.format_prompt(fake + new_messages)
-            prefix = self.format_prompt(fake, add_generation_prompt=False)
-            formatted = self.tool_parser.message_separator + full[len(prefix) :]
-            return _tokenize(formatted)
+        # Incremental: fake prefix subtraction with message_separator bridge
+        if len(messages) > self.message_count:
+            new_hf_messages = self.format_messages(
+                self.sort_tool_results(messages[self.message_count :]), is_multimodal=self.is_multimodal
+            )
+            update_multimodal_data(new_hf_messages)
+            fake_messages = [
+                {"role": "system", "content": [{"text": "FAKE SYSTEM PROMPT"}]},
+                {"role": "user", "content": [{"text": "FAKE USER MESSAGE"}]},
+            ]
+            fake_hf_messages = self.format_messages(cast(Messages, fake_messages), is_multimodal=self.is_multimodal)
+            full_prompt = cast(
+                str,
+                self.tokenizer.apply_chat_template(
+                    fake_hf_messages + new_hf_messages, add_generation_prompt=True, **self._chat_template_kwargs
+                ),
+            )
+            prefix_prompt = cast(
+                str,
+                self.tokenizer.apply_chat_template(
+                    fake_hf_messages, add_generation_prompt=False, **self._chat_template_kwargs
+                ),
+            )
+            assert full_prompt.startswith(prefix_prompt), "full prompt must start with prefix prompt"
+            prompt = self.message_separator + full_prompt[len(prefix_prompt) :]
+            return list(self.tokenizer.encode(prompt, add_special_tokens=False))
 
-        return None
+        raise RuntimeError(f"No new messages to tokenize (message_count={self.message_count}, got {len(messages)})")
 
-    def _sort_tool_results(self, messages: Messages) -> Messages:
-        """Sort tool results by ID to match original call order (IDs are sequential: call_0000, call_0001, ...)."""
-        result = []
-        for msg in messages:
-            if msg.get("role") != "user" or not isinstance(msg.get("content"), list):
-                result.append(msg)
-                continue
-            content = msg["content"]
-            tool_results = [b for b in content if isinstance(b, dict) and "toolResult" in b]
-            if not tool_results:
-                result.append(msg)
-                continue
-            other = [b for b in content if not (isinstance(b, dict) and "toolResult" in b)]
-            tool_results.sort(key=lambda b: b.get("toolResult", {}).get("toolUseId", ""))
-            result.append({**msg, "content": other + tool_results})
-        return result
+    # -------------------------------------------------------------------------
+    # Generation
+    # -------------------------------------------------------------------------
 
-    def _yield_tool_use_events(
+    @override
+    async def stream(
         self,
-        tool_calls: list[ToolParseResult],
-    ) -> Iterator[StreamEvent]:
-        """Yield toolUse stream events for parsed tool calls.
+        messages: Messages,
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+        *,
+        tool_choice: ToolChoice | None = None,
+        system_prompt_content: list[SystemContentBlock] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterable[StreamEvent]:
+        """Non-streaming chat completion via SGLang's `/generate` endpoint."""
+        # Prepare request
+        config = self.get_config()
+        sampling_params: dict[str, Any] = dict(config.get("sampling_params") or {})
+        sampling_params.setdefault("skip_special_tokens", False)
+        return_logprob = config.get("return_logprob", True)
+        new_input_ids = self.tokenize_prompt_messages(messages, system_prompt, tool_specs=tool_specs)
+        # Tracking token IDs in token_manager to ensure the token-in feature
+        input_ids = self.token_manager.token_ids + new_input_ids
 
-        Each tool call emits three events following the Strands streaming protocol:
-        - `contentBlockStart`: begins block with toolUseId and name
-        - `contentBlockDelta`: contains the tool input (delta = incremental data)
-        - `contentBlockStop`: ends the block
-        """
-        for tool_call in tool_calls:
+        # Assistant message start
+        yield {"messageStart": {"role": "assistant"}}
+        yield {"contentBlockStart": {"start": {}}}
+
+        # Call SGLang's `/generate` endpoint
+        try:
+            response = await self.client.generate(
+                input_ids=input_ids,
+                sampling_params=sampling_params,
+                return_logprob=return_logprob,
+                logprob_start_len=max(0, len(self.token_manager.token_ids) - 1) if return_logprob else None,
+                image_data=self.image_data or None,
+            )
+
+            # Extract response data
+            text = response["text"]
+            output_ids = response["output_ids"]
+            meta_info = response["meta_info"]
+            input_token_logprobs = meta_info.get("input_token_logprobs")
+            output_token_logprobs = meta_info.get("output_token_logprobs")
+
+            # Assistant message content delta (single delta for non-streaming)
+            yield {"contentBlockDelta": {"delta": {"text": text}}}
+
+        except SGLangContextLengthError as e:
+            raise ContextWindowOverflowException(f"Context length exceeded: {e.body}") from e
+        except SGLangThrottledError as e:
+            raise ModelThrottledException(f"Service throttled (status={e.status}): {e.body}") from e
+
+        # Update token trajectory
+        self.token_manager.add_prompt(
+            token_ids=new_input_ids,
+            logprobs=[e[0] for e in input_token_logprobs[-len(new_input_ids) :]] if input_token_logprobs else None,
+        )
+        self.token_manager.add_response(
+            token_ids=output_ids,
+            logprobs=[e[0] for e in output_token_logprobs] if output_token_logprobs else None,
+        )
+        self.message_count = len(messages) + 1
+
+        # Assistant message content stop
+        yield {"contentBlockStop": {}}
+
+        # Assistant message tool use content - start, delta, stop
+        parsed_tool_calls = self.tool_parser.parse(text)
+        for tool_call in parsed_tool_calls:
             if tool_call.is_error:
                 logger.warning("Tool parse error for '%s': %s", tool_call.name, (tool_call.raw or "")[:100])
-                # Track parse error count per tool name
                 self.tool_parse_errors[tool_call.name] = self.tool_parse_errors.get(tool_call.name, 0) + 1
 
             yield {
@@ -366,108 +410,24 @@ class SGLangModel(Model):
             }
             yield {"contentBlockStop": {}}
 
-    def _extract_logprobs(self, event: dict[str, Any], key: str) -> list[float] | None:
-        """Extract logprobs from SGLang event (format: [[logprob, token_id, ...], ...])."""
-        meta_info = event.get("meta_info", {})
-        logprobs = meta_info.get(key) or event.get(key)
-        if isinstance(logprobs, list) and logprobs:
-            return [entry[0] for entry in logprobs]
-        return None
-
-    @override
-    async def stream(
-        self,
-        messages: Messages,
-        tool_specs: list[ToolSpec] | None = None,
-        system_prompt: str | None = None,
-        *,
-        tool_choice: ToolChoice | None = None,
-        system_prompt_content: list[SystemContentBlock] | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterable[StreamEvent]:
-        """Chat completion with SGLangModel using the `/generate` endpoint.
-
-        The `stream` method follows Strands' protocol but actually disabled here for training-only usage.
-        This means users won't see streaming behavior such as print callbacks.
-        """
-        # Prepare request
-        tools = self.format_tool_specs(tool_specs) if tool_specs else None
-        config = self.get_config()
-        sampling_params: dict[str, Any] = dict(config.get("sampling_params") or {})
-        sampling_params.setdefault("skip_special_tokens", False)
-        return_logprob = config.get("return_logprob", True)
-        new_input_tokens = self.tokenize_prompt_messages(messages, system_prompt, tools=tools)
-        # Tracking token IDs in token_manager to ensure the token-in feature
-        input_ids = self.token_manager.token_ids + (new_input_tokens or [])
-
-        # Start message
-        yield {"messageStart": {"role": "assistant"}}
-        yield {"contentBlockStart": {"start": {}}}
-
-        # Call SGLangClient (non-streaming POST for better parallelism)
-        try:
-            response = await self.client.generate(
-                input_ids=input_ids,
-                sampling_params=sampling_params,
-                return_logprob=return_logprob,
-                logprob_start_len=len(self.token_manager.token_ids) if return_logprob else None,
-                image_data=self.image_data or None,
-            )
-
-            # Extract response data
-            text = response.get("text", "")
-            output_ids = response.get("output_ids", [])
-            output_logprobs = self._extract_logprobs(response, "output_token_logprobs")
-            input_logprobs = self._extract_logprobs(response, "input_token_logprobs")
-            meta_info = response.get("meta_info", {})
-
-            # Yield text as single delta (non-streaming gives complete text at once)
-            if text:
-                yield {"contentBlockDelta": {"delta": {"text": text}}}
-
-        except SGLangContextLengthError as e:
-            raise ContextWindowOverflowException(f"Context length exceeded: {e.body}") from e
-        except SGLangThrottledError as e:
-            raise ModelThrottledException(f"Service throttled (status={e.status}): {e.body}") from e
-
-        # Update token trajectory
-        if new_input_tokens:
-            new_input_logprobs = input_logprobs[-len(new_input_tokens) :] if input_logprobs else None
-            self.token_manager.add_prompt(token_ids=new_input_tokens, logprobs=new_input_logprobs)
-        if output_ids:
-            self.token_manager.add_response(token_ids=output_ids, logprobs=output_logprobs)
-        self._processed_message_count = len(messages) + 1
-
-        # End text block, start tool use blocks if there are any tool calls
-        yield {"contentBlockStop": {}}
-
-        # Parse tool calls and yield events
-        parsed_tool_calls = self.tool_parser.parse(text)
-        for event in self._yield_tool_use_events(parsed_tool_calls):
-            yield event
-
-        # Determine stop reason
+        # Assistant message stop
         stop_reason: str = "tool_use" if parsed_tool_calls else "end_turn"
-        if meta_info and isinstance(meta_info.get("finish_reason"), dict):
-            if meta_info["finish_reason"].get("type") == "length":
-                stop_reason = "max_tokens"
-
+        if meta_info["finish_reason"]["type"] == "length":
+            stop_reason = "max_tokens"
         yield {"messageStop": {"stopReason": cast(StopReason, stop_reason)}}
 
-        # Yield usage metadata
-        if meta_info:
-            prompt_tokens = int(meta_info.get("prompt_tokens") or 0)
-            completion_tokens = int(meta_info.get("completion_tokens") or 0)
-            yield {
-                "metadata": {
-                    "usage": {
-                        "inputTokens": prompt_tokens,
-                        "outputTokens": completion_tokens,
-                        "totalTokens": prompt_tokens + completion_tokens,
-                    },
-                    "metrics": {"latencyMs": int(float(meta_info.get("e2e_latency") or 0) * 1000)},
-                }
+        # Assistant message usage metadata
+        yield {
+            "metadata": {
+                "usage": {
+                    "inputTokens": meta_info["prompt_tokens"],
+                    "outputTokens": meta_info["completion_tokens"],
+                    "totalTokens": meta_info["prompt_tokens"] + meta_info["completion_tokens"],
+                    "cacheReadInputTokens": meta_info["cached_tokens"],
+                },
+                "metrics": {"latencyMs": int(meta_info["e2e_latency"] * 1000)},
             }
+        }
 
     @override
     async def structured_output(
@@ -477,33 +437,21 @@ class SGLangModel(Model):
         system_prompt: str | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[dict[str, T | Any], None]:
-        """Get structured output using SGLang's constrained decoding.
+        """Structured output via SGLang's `json_schema` constrained decoding.
 
-        Uses SGLang's `json_schema` parameter for FSM-based constrained generation,
-        guaranteeing output conforms to the Pydantic model schema.
-
-        Note: This method does NOT update token_manager (no TITO tracking).
-        Intended for inference-only use cases like LLM-as-Judge.
-
-        Args:
-            output_model: Pydantic model class defining the output schema.
-            prompt: Messages to send to the model.
-            system_prompt: Optional system prompt.
-            **kwargs: Additional arguments (unused).
-
-        Yields:
-            Single dict with "output" key containing the parsed Pydantic model instance.
-
-        Raises:
-            ValidationError: If model output fails Pydantic validation.
-            SGLangHTTPError: On non-retryable HTTP errors.
+        Notes:
+            Does not update `token_manager` (no token trajectory tracking).
         """
         # Convert Pydantic model to JSON schema string
         json_schema = json.dumps(output_model.model_json_schema())
 
         # Format and tokenize prompt (no tools for structured output)
-        formatted = self.format_prompt(prompt, system_prompt, tools=None)
-        input_ids = self.tokenizer.encode(formatted, add_special_tokens=False)
+        hf_messages = self.format_messages(prompt, system_prompt, is_multimodal=self.is_multimodal)
+        formatted_prompt = cast(
+            str,
+            self.tokenizer.apply_chat_template(hf_messages, add_generation_prompt=True, **self._chat_template_kwargs),
+        )
+        input_ids = self.tokenizer.encode(formatted_prompt, add_special_tokens=False)
 
         # Build sampling params with json_schema constraint
         config = self.get_config()
@@ -523,7 +471,7 @@ class SGLangModel(Model):
             raise ModelThrottledException(f"Service throttled (status={e.status}): {e.body}") from e
 
         # Parse and validate response
-        text = response.get("text", "")
+        text = response["text"]
         parsed = output_model.model_validate_json(text)
 
         yield {"output": parsed}

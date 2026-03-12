@@ -17,7 +17,6 @@
 import pytest
 
 from strands_sglang.tool_parsers import (
-    DeepSeekV32ToolParser,
     GLMToolParser,
     HermesToolParser,
     KimiK2ToolParser,
@@ -242,9 +241,6 @@ def hello():
         assert len(results) == 1
         assert results[0].name == "actual"
 
-    def test_message_separator(self, parser):
-        assert parser.message_separator == "\n"
-
     def test_real_world_git_status_example(self, parser):
         """Parse real-world example from Qwen3-Coder."""
         text = """I'll check the git status for you.
@@ -372,9 +368,6 @@ class TestGLMToolParser:
         assert results[0].name == "actual"
         assert results[0].input == {"y": 2}
 
-    def test_message_separator(self, parser):
-        assert parser.message_separator == ""
-
     def test_real_world_example(self, parser):
         """Parse real-world example from GLM-4."""
         text = """I'll search for that information.
@@ -412,11 +405,11 @@ class TestKimiK2ToolParser:
         assert len(results) == 1
         assert results[0].name == "calculator"
         assert results[0].input == {"x": 1, "y": 2}
-        assert results[0].id == "call_0000"
+        assert results[0].id == "functions.calculator:0"
         assert results[0].is_error is False
 
-    def test_parse_multiple_tool_calls_with_sequential_ids(self, parser):
-        """Multiple calls get sequential IDs, including across sections."""
+    def test_parse_multiple_tool_calls_preserves_raw_ids(self, parser):
+        """Multiple calls preserve raw IDs for chat template round-trip."""
         text = (
             "<|tool_calls_section_begin|>"
             "<|tool_call_begin|>functions.tool_a:0"
@@ -437,7 +430,7 @@ class TestKimiK2ToolParser:
 
         assert len(results) == 3
         assert [r.name for r in results] == ["tool_a", "tool_b", "tool_c"]
-        assert [r.id for r in results] == ["call_0000", "call_0001", "call_0002"]
+        assert [r.id for r in results] == ["functions.tool_a:0", "functions.tool_b:0", "functions.tool_c:1"]
 
     def test_parse_no_tool_calls(self, parser):
         assert parser.parse("Just some regular text.") == []
@@ -447,9 +440,10 @@ class TestKimiK2ToolParser:
         "func_id, expected_name",
         [
             ("functions.my_tool:0", "my_tool"),  # standard dotted format
+            ("functions.web_search:0", "web_search"),  # underscored
             ("functions.web-search:0", "web-search"),  # hyphenated
             ("functions.module.sub_tool:0", "module.sub_tool"),  # nested dotted
-            ("calculator:0", "calculator:0"),  # no dot — raw ID as name
+            ("calculator:0", "calculator"),  # no functions. prefix — still extracts name
         ],
     )
     def test_function_name_extraction(self, parser, func_id, expected_name):
@@ -519,138 +513,6 @@ class TestKimiK2ToolParser:
         assert len(results) == 1
         assert results[0].name == "real"
 
-    def test_message_separator_is_empty(self, parser):
-        assert parser.message_separator == ""
-
-
-class TestDeepSeekV32ToolParser:
-    """Tests for DeepSeekV32ToolParser (DeepSeek-V3.2 DSML format)."""
-
-    @pytest.fixture
-    def parser(self):
-        return DeepSeekV32ToolParser()
-
-    def test_parse_single_tool_call(self, parser):
-        text = (
-            "<｜DSML｜function_calls>\n"
-            '<｜DSML｜invoke name="get_weather">\n'
-            '<｜DSML｜parameter name="city" string="true">London</｜DSML｜parameter>\n'
-            '<｜DSML｜parameter name="days" string="false">5</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-            "</｜DSML｜function_calls>"
-        )
-        results = parser.parse(text)
-
-        assert len(results) == 1
-        assert results[0].name == "get_weather"
-        assert results[0].input == {"city": "London", "days": 5}
-        assert results[0].id == "call_0000"
-        assert results[0].is_error is False
-
-    def test_parse_multiple_tool_calls(self, parser):
-        """Multiple calls get sequential IDs."""
-        text = (
-            "<｜DSML｜function_calls>\n"
-            '<｜DSML｜invoke name="tool_a">\n'
-            '<｜DSML｜parameter name="x" string="false">1</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-            '<｜DSML｜invoke name="tool_b">\n'
-            '<｜DSML｜parameter name="y" string="true">hello</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-            "</｜DSML｜function_calls>"
-        )
-        results = parser.parse(text)
-
-        assert len(results) == 2
-        assert results[0].name == "tool_a"
-        assert results[0].input == {"x": 1}
-        assert results[0].id == "call_0000"
-        assert results[1].name == "tool_b"
-        assert results[1].input == {"y": "hello"}
-        assert results[1].id == "call_0001"
-
-    def test_parse_no_tool_calls(self, parser):
-        assert parser.parse("Just some regular text.") == []
-        assert parser.parse("") == []
-
-    def test_invoke_with_no_parameters(self, parser):
-        text = '<｜DSML｜function_calls>\n<｜DSML｜invoke name="no_args">\n</｜DSML｜invoke>\n</｜DSML｜function_calls>'
-        results = parser.parse(text)
-
-        assert results[0].name == "no_args"
-        assert results[0].input == {}
-
-    @pytest.mark.parametrize(
-        "string_flag, raw_value, expected",
-        [
-            ("true", "123", "123"),  # string keeps raw value
-            ("true", "true", "true"),  # string "true" != bool True
-            ("false", "42", 42),  # int
-            ("false", "true", True),  # bool
-            ("false", "[1, 2, 3]", [1, 2, 3]),  # list
-            ("false", '{"a": 1}', {"a": 1}),  # object
-            ("false", "not json", "not json"),  # invalid JSON falls back to string
-        ],
-    )
-    def test_parameter_type_handling(self, parser, string_flag, raw_value, expected):
-        """string attribute controls whether value is kept as string or JSON-decoded."""
-        text = (
-            "<｜DSML｜function_calls>\n"
-            f'<｜DSML｜invoke name="tool">\n'
-            f'<｜DSML｜parameter name="val" string="{string_flag}">{raw_value}</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-            "</｜DSML｜function_calls>"
-        )
-        results = parser.parse(text)
-
-        assert results[0].input["val"] == expected
-
-    def test_exclude_tool_calls_inside_think_block(self, parser):
-        text = (
-            "<think>\n"
-            "<｜DSML｜function_calls>\n"
-            '<｜DSML｜invoke name="draft">\n'
-            '<｜DSML｜parameter name="x" string="false">1</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-            "</｜DSML｜function_calls>\n"
-            "</think>\n"
-            "<｜DSML｜function_calls>\n"
-            '<｜DSML｜invoke name="actual">\n'
-            '<｜DSML｜parameter name="y" string="false">2</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-            "</｜DSML｜function_calls>"
-        )
-        results = parser.parse(text)
-
-        assert len(results) == 1
-        assert results[0].name == "actual"
-        assert results[0].input == {"y": 2}
-
-    def test_message_separator_is_eos(self, parser):
-        assert parser.message_separator == "<｜end▁of▁sentence｜>"
-
-    def test_unclosed_function_calls_tag(self, parser):
-        text = (
-            "<｜DSML｜function_calls>\n"
-            '<｜DSML｜invoke name="tool">\n'
-            '<｜DSML｜parameter name="x" string="false">1</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-        )
-        assert parser.parse(text) == []
-
-    def test_whitespace_before_closing_bracket(self, parser):
-        """Tolerates whitespace before > in opening tags (matching original PR)."""
-        text = (
-            "<｜DSML｜function_calls>\n"
-            '<｜DSML｜invoke name="tool" >\n'
-            '<｜DSML｜parameter name="x" string="false" >1</｜DSML｜parameter>\n'
-            "</｜DSML｜invoke>\n"
-            "</｜DSML｜function_calls>"
-        )
-        results = parser.parse(text)
-
-        assert results[0].input == {"x": 1}
-
 
 class TestToolParserRegistry:
     """Tests for tool parser registry."""
@@ -662,7 +524,6 @@ class TestToolParserRegistry:
             ("qwen_xml", QwenXMLToolParser),
             ("glm", GLMToolParser),
             ("kimi_k2", KimiK2ToolParser),
-            ("deepseek_v32", DeepSeekV32ToolParser),
         ],
     )
     def test_registered_parser(self, name, expected_cls):
