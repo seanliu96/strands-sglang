@@ -187,6 +187,7 @@ Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `buil
 
 ## Related Projects
 
+- [agent-core-rl-toolkit](https://github.com/awslabs/agentcore-rl-toolkit)  - RL training toolkit with Bedrock AgentCore
 - [strands-vllm](https://github.com/agents-community/strands-vllm) - Community vLLM provider for Strands Agents SDK
 
 ## License
