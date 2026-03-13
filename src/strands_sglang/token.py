@@ -31,20 +31,17 @@ class Token:
 class TokenManager:
     """Manages token accumulation with segment-based prompt/response tracking.
 
-    Tokens are organized into segments, where each segment is either:
-    - PROMPT: System messages, user input, tool results (loss_mask=False)
-    - RESPONSE: Model outputs (loss_mask=True)
-
-    During an agent loop with the `SGLangModel` backend, segments are added in this order::
-
-        segments[0]: PROMPT   — initial prompt (system + tools + user message / conversation history)
-        segments[1]: RESPONSE — first model output (may include tool calls)
-        segments[2]: PROMPT   — tool results (if tool use occurred)
-        segments[3]: RESPONSE — next model output
-        ...                   — alternating PROMPT/RESPONSE until the loop ends
-
-    `segments[0]` always contains the full initial prompt from the first
-    generation call. Everything after it is the rollout.
+    Notes:
+        - Tokens are organized into `segments`, where each segment is either:
+            - `PROMPT`: System messages, user input, tool results (loss_mask=False)
+            - `RESPONSE`: Model outputs (loss_mask=True)
+        - During an agent loop with the `SGLangModel` backend, segments are added in this order:
+            - `segments[0]`: `PROMPT`   — initial prompt (system + tools + user message / conversation history)
+            - `segments[1]`: `RESPONSE` — first model output (may include tool calls)
+            - `segments[2]`: `PROMPT`   — tool results (if tool use occurred)
+            - `segments[3]`: `RESPONSE` — next model output
+            - ...                   — alternating `PROMPT`/`RESPONSE` until the loop ends
+        - `segments[0]` always contains the full initial prompt from the first generation call. Everything after it is the rollout.
 
     Example:
         >>> manager = TokenManager()

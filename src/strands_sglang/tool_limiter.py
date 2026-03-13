@@ -42,11 +42,11 @@ class MaxToolCallsReachedError(Exception):
 class ToolLimiter(HookProvider):
     """Hook to enforce tool iteration and/or tool call limits on agent tool loops.
 
-    An "iteration" is one cycle of: model generates tool call(s) -> tool(s) execute -> result(s) returned.
-    Multiple parallel tool calls in one model response count as a single iteration but as individual calls.
-
-    The limiter raises after the iteration completes (on tool result), ensuring a clean trajectory
-    without requiring token truncation.
+    Notes:
+        - An "iteration" is one cycle of: model generates tool call(s) -> tool(s) execute -> result(s) returned.
+        - Multiple parallel tool calls in one model response count as a single iteration but as individual calls.
+        - The limiter raises after the iteration completes (on tool result), ensuring a clean trajectory
+          without requiring token truncation.
 
     Example:
         >>> limiter = ToolLimiter(max_tool_iters=5)

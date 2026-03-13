@@ -57,11 +57,11 @@ CONTEXT_LENGTH_PATTERNS = ("exceed", "too long", "maximum length", "context leng
 class SGLangClient:
     """Async HTTP client for SGLang server with connection pooling and retry.
 
-    Designed for RL training stability with aggressive retry on transient errors.
-    Aligned with slime's http_utils.py approach.
-
-    Uses non-streaming POST requests for better parallelism in high-concurrency
-    training scenarios (no SSE overhead, connections released immediately).
+    Notes:
+        - Designed for RL training stability with aggressive retry on transient errors.
+        Aligned with slime's `http_utils.py` approach.
+        - Uses non-streaming POST requests for better parallelism in high-concurrency
+        training scenarios (no SSE overhead, connections released immediately).
 
     Example:
         >>> async with SGLangClient(base_url="http://localhost:30000") as client:
