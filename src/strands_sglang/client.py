@@ -105,6 +105,7 @@ class SGLangClient:
         self._timeout = timeout
         self._connect_timeout = connect_timeout
         self._session: aiohttp.ClientSession | None = None
+        self._is_multimodal: bool | None = None
 
         logger.info(
             "SGLangClient initialized: base_url=%s, max_connections=%s, timeout=%s, max_retries=%s",
@@ -264,20 +265,32 @@ class SGLangClient:
         except Exception:
             return False
 
-    async def get_model_info(self) -> dict[str, Any] | None:
+    async def model_info(self) -> dict[str, Any] | None:
         """Get model information from the SGLang server.
 
         Returns:
-            Dict containing model info from `/get_model_info` endpoint, or None on error.
+            Dict containing model info from `/model_info` endpoint, or None on error.
             Important fields include:
             - model_path: HuggingFace model ID or local path
             - tokenizer_path: Tokenizer path (may differ from model_path)
         """
         try:
             session = self._get_session()
-            async with session.get("/get_model_info") as resp:
+            async with session.get("/model_info") as resp:
                 if resp.status >= 400:
                     return None
                 return await resp.json(content_type=None)
         except Exception:
             return None
+
+    async def is_multimodal(self) -> bool:
+        """Check if the server's model supports multimodal (image) input.
+
+        Queries `/model_info` for the `has_image_understanding` field. Result is cached
+        after the first successful query.
+        """
+        if self._is_multimodal is not None:
+            return self._is_multimodal
+        info = await self.model_info()
+        self._is_multimodal = bool(info.get("has_image_understanding", False)) if info else False
+        return self._is_multimodal
