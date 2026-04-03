@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from typing import Any
 
 from typing_extensions import override
 
@@ -75,12 +77,15 @@ class QwenXMLToolParser(ToolParser):
                 continue
 
             # Parse all parameters from the function body
-            arguments: dict[str, str] = {}
+            arguments: dict[str, Any] = {}
             for param_match in self._PARAMETER_PATTERN.finditer(func_body):
                 param_name = param_match.group(1).strip()
                 param_value = param_match.group(2).strip()
                 if param_name:
-                    arguments[param_name] = param_value
+                    try:
+                        arguments[param_name] = json.loads(param_value)
+                    except (json.JSONDecodeError, ValueError):
+                        arguments[param_name] = param_value
 
             tool_calls.append(
                 ToolParseResult(
