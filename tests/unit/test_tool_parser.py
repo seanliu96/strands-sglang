@@ -185,7 +185,7 @@ class TestQwenXMLToolParser:
 
         assert len(results) == 1
         assert results[0].name == "calculator"
-        assert results[0].input == {"x": "1", "y": "2"}
+        assert results[0].input == {"x": 1, "y": 2}
         assert results[0].is_error is False
 
     def test_parse_multiple_tool_calls_with_sequential_ids(self, parser):
