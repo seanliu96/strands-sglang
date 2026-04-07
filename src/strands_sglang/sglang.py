@@ -103,10 +103,10 @@ class SGLangModel(Model):
 
         # State tracking (this makes SGLangModel stateful)
         self.token_manager = TokenManager()
+        self.routed_experts: str | None = None  # base64-encoded MoE expert indices (flat int32)
         self.message_count: int = 0
         self.tool_parse_errors: dict[str, int] = {}  # per-tool parse error count
         self.image_data: list[str] = []  # accumulated image data URLs (VLM only)
-        self.routed_experts: NDArray[np.int32] | None = None  # MoE expert indices from last /generate
 
         logger.debug("initialized with config: %s", self.config)
 
@@ -117,6 +117,25 @@ class SGLangModel(Model):
         self.tool_parse_errors = {}
         self.image_data = []
         self.routed_experts = None
+
+    async def decode_routed_experts(self, num_layers: int, top_k: int) -> NDArray[np.int32]:
+        """Decode base64 routed experts into a shaped numpy array.
+
+        Args:
+            num_layers: Number of MoE layers in the model.
+            top_k: Number of experts selected per token (moe_router_topk).
+
+        Returns:
+            Array of shape `(seq_len - 1, num_layers, top_k)`.
+        """
+        assert self.routed_experts is not None, "routed_experts is None — was return_routed_experts enabled?"
+        raw = self.routed_experts
+        seq_len = len(self.token_manager.token_ids)
+        return await asyncio.to_thread(
+            lambda: np.frombuffer(pybase64.b64decode(raw.encode("ascii")), dtype=np.int32).reshape(
+                seq_len - 1, num_layers, top_k
+            )
+        )
 
     # -------------------------------------------------------------------------
     # Model interface implementation
@@ -385,11 +404,9 @@ class SGLangModel(Model):
         )
         # Update routed experts for R3
         # TODO: pass routed_experts_start_len (like logprob_start_len) once SGLang wires it up,
-        # Need to reshape to (seq_len-1, num_layers, top_k) once knowing num_layers and top_k
-        if return_routed_experts:
-            self.routed_experts = await asyncio.to_thread(
-                lambda: np.frombuffer(pybase64.b64decode(meta_info["routed_experts"].encode("ascii")), dtype=np.int32)
-            )
+        # to avoid receiving the full-sequence payload on every multi-turn call.
+        self.routed_experts = meta_info["routed_experts"] if return_routed_experts else None
+        # Update message count
         self.message_count = len(messages) + 1
 
         # Assistant message content stop
