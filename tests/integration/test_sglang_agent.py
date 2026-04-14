@@ -1,4 +1,4 @@
-# Copyright 2025-2026 Horizon RL Contributors
+# Copyright 2025-2026 Strands RL Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -148,6 +148,7 @@ async def test_multi_tool_dispatch(model):
     try:
         await agent.invoke_async(problem)
     except MaxTokensReachedException:
+        # Hitting the token limit is allowed here; we only assert on tool usage below.
         pass
 
     # Should have used both tools

@@ -1,4 +1,4 @@
-# Copyright 2025-2026 Horizon RL Contributors
+# Copyright 2025-2026 Strands RL Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,10 +27,11 @@ from .sglang import SGLangModel
 from .token import Token, TokenManager
 from .tool_limiter import MaxToolCallsReachedError, MaxToolIterationsReachedError, ToolLimiter
 from .tool_parsers import get_tool_parser
-from .utils import get_client, get_client_from_slime_args, get_tokenizer
+from .utils import decode_routed_experts, get_client, get_client_from_slime_args, get_tokenizer
 
 __all__ = [
-    # Cache utilities
+    # Utilities
+    "decode_routed_experts",
     "get_client",
     "get_client_from_slime_args",
     "get_tokenizer",
